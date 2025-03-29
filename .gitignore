@@ -1,0 +1,12 @@
+target/
+.idea/
+.bsp/
+project/project/
+project/target/
+project
+.DS_Store
+
+# Terraform-generated files
+.terraform/
+.terraform.*
+terraform.*
