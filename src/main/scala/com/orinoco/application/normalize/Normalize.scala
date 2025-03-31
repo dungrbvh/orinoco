@@ -23,6 +23,8 @@ import com.orinoco.schema.cdna.CustomerDNA
 import com.rakuten.rat.config.base.AppConfig
 import org.apache.commons.lang3.exception.ExceptionUtils
 
+import java.util.concurrent.atomic.LongAccumulator
+
 object Normalize {
 
   def readRawJson(inputPaths: List[String])(implicit  spark: SparksSession): Dataset[Parsed] = {
@@ -99,7 +101,106 @@ object Normalize {
 
       /* Filter */
       // Filtering on general exclusion rules
-      val parsedFiltered: Dataset[Parsed] =
+      val parsedFiltered: Dataset[Parsed] = steps.RepartitionAndFilterRecord(
+        parsed = parsed, numPartitions = numPartitions, broadcastConfig = broadcastConfig
+      ).persist(StorageLevel.MEMORY_AND_DISK_SER)
+
+      /* Broadcast For Spark Executors */
+      val broadcastInfoToNormalizeWithUser: Broadcast[MapTablesToRecordAndBroadcast] =
+        steps.MapTablesToRecordAndBroadcast(
+          parsedFiltered,
+          normalizeConfig,
+          inputSnapshotCompanyMapping,
+          inputSnapshotServiceGroupTimezoneList,
+          inputSnapshotServiceCategoryMapping,
+          inputSnapshotServiceGroupMapping,
+          env,
+          hourDT
+        )(spark)
+
+      // Build up accumulators
+      val normalizeFatalCounter: LongAccumulator = spark.sparkContext.longAccumulator("normalize_fatal_counter")
+
+      /* Normalization */
+      val normalizedWithUserEither: Dataset[Either[String, NormalizedWithUser]] =
+        steps.NormalizeWithUserRecord(parsedFiltered = parsedFiltered, broadcast = broadcastInfoToNormalizeWithUser, normalizeFatalCounter = normalizeFatalCounter)
+
+      /* Separate Output: Exceptions <-> Results */
+      val normalizedWithUser = normalizedWithUserEither.flatMap(_.right.toOption)
+      val normalizedWithUserExceptions = normalizedWithUserEither.flatMap(_.left.toOption)
+
+      /* Combine with CDNA */
+      val idList = normalizedWithUserEither.flatMap(_.norm.easyid).distinct
+      val cdnaDS = broadcastInfoToNormalizeWithUser.value.cdnaMapping
+
+      val normWithEasyID: Dataset[NormalizedWithUser] = normalizedWithUser.filter(_.norm.easyid.nonEmpty)
+      val normWithoutEasyID: Dataset[NormalizedWithUser] = normalizedWithUser.filter(_.norm.easyid.isEmpty)
+
+      val filteredCDNA = cdnaDS
+        .joinWith(idList, idList("value") === cdnaDS("cdna_easy_id"), "inner")
+        .map(_._1)
+
+      val normalizedWithCDNA: Dataset[NormalizedWithUser] = normWithEasyID
+        .joinWith(filterCDNA, normWithEasyID("norm.easy_id") === filteredCDNA("cdna_easy_id"), "left")
+        .map(x => {
+          val normalizedWithUser: NormalizedWithUser = x._1
+          val cdna: CustomerDNA = x._2
+          if (cdna != null)
+            normalizedWithUser.copy(
+              cdna = cdna
+            )
+          else
+            NormalizedWithUser
+        })
+      val normWithCDNA = normalizedWithCDNA.unionAll(normWithoutEasyID)
+
+      // Output exceptions
+      if (true) {
+        normalizedWithUserExceptions
+          .repartition(10)
+          .toDF.write
+          .text(exceptionsOutputPath)
+      }
+
+      /* Write result */
+      val normalizeOutputCounter: LongAccumulator = spark.sparkContext.longAccumulator("normalize_output_counter")
+
+      steps.WriteNormalizedWithUser(
+        normWithCDNA,
+        broadcastConfig,
+        numPartitions,
+        outputPath,
+        normalizeOutputCounter
+      )
+
+      val firstInputJSONCount = parsedCount
+      val lastInputJSONCount = parsed.count()
+      // JSON Preflight Check may pass with records still being written in input JSON HDFS directory.
+      // Goal of validation is to compare firstInputJSONCount with lastInputJSONCount value of Normalization.
+      // If firstInputJSONCount is not equal to lastInputJSONCount, Normalize job should fail.
+      if (firstInputJSONCount != lastInputJSONCount) {
+        val message = s"Input count has been changed. " +
+          s"First input count: [$firstInputJSONCount], Final input count: [$lastInputJSONCount]."
+
+        logger.info(message)
+        throw new Exception(message)
+      }
+      // Elastic log for success
+
+    } catch { // Catches any issue and proceeds to log for debugging purposes.
+      case e: Exception => // Indicates application issue (I.E. FileNotFoundException)
+        val message = "Exception occured at: " + ExceptionUtils.getStackTrace(e)
+        logger.info(message)
+        throw e
+      case e: Error => // Indicates non application issue (I.E. OutOfMemoryError)
+        val message = "Error occurred at: " + ExceptionUtils.getStackTrace(e)
+        logger.info(message)
+        throw e
+      case t: Throwable => // Throwables are caught for the purpose of logging all errors.
+        val message = "Throwable occurred at: " + ExceptionUtils.getStackTrace(t)
+        logger.info(message)
+        throw t
     }
+    finally logger.info("Application finished") // Used to mark true end of application run.
   }
 }
