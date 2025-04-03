@@ -1,4 +1,4 @@
-package com.rakuten.rat.config.base
+package com.orinoco.config.base
 
 import com.typesafe.config.{Config, ConfigFactory}
 import org.apache.log4j.Logger
