@@ -131,7 +131,16 @@ object Sessionize {
       analyzed.unpersist()
 
     } catch { // Catches any issue and proceeds to log for debugging purposes.
-      case
+      case t: Throwable => // Throwables are caught for the purpose of logging all errors.
+        checkCorruptedParquet(Option(t))
+        .foreach(message => {
+          logger.error("Input parquet is corrupted. Creating an error message file.")
+          createHDFSFileWithContent(errorMessageFile, message)
+          })
+        val message = "Throwable occurred at: " + ExceptionUtils.getStackTrace(t)
+        logger.error(message)
+        throw t
     }
+    finally logger.info("Application finished") // Used to mark true end of application run.
   }
 }
