@@ -88,7 +88,7 @@ object Sessionize {
             .as[SessionizationCache]
 
       /* Filter Cache */
-      val filterCaches = steps.FilterCaches.asDataset(
+      val filteredCaches = steps.FilterCaches.asDataset(
         sessionizationCache,
         hourEndTimeStamp,
         lookBackWindowHours
@@ -120,7 +120,18 @@ object Sessionize {
         .persist(StorageLevel.MEMORY_AND_DISK)
 
       /* Write results */
-      steps.
+      steps.WriteSessionCachePayload.asDataset(
+        analyzed, cacheCount, partitionConfig.cachedRecordsPerCutFile, outputCache, filteredCaches
+      )(spark)
+
+      steps.WriteSessionizePayload.asDataset(
+        analyzed, nonRoboticEvents.totalInputCount, partitionConfig.recordsPerCutFile, outputPath
+      )(spark)
+
+      analyzed.unpersist()
+
+    } catch { // Catches any issue and proceeds to log for debugging purposes.
+      case
     }
   }
 }
