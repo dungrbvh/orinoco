@@ -107,7 +107,20 @@ object Sessionize {
       )(spark)
 
       /* Remove Duplications */
-      val deduplicated = steps.
+      val deduplicated = steps.DedupAndOrderPerSG.asDataset(initialized)(spark)
+
+      /* Calculate Previous Data Via Company Grouping */
+      val withPreviousPage = steps.PreviousDataPerCompany.asDataset(deduplicated)(spark)
+
+      /* Section Data Into Sessions */
+      val cutIntoSessions = steps.CutIntoSessions.asDataset(withPreviousPage, hourEndTimeStamp, sessionLifetimeMapping)(spark)
+
+      /* Calculate Data Via Service Group Groupings For Post Calculation */
+      val analyzed = steps.PostSessionCut.asDataset(cutIntoSessions, evarDimensions)(spark)
+        .persist(StorageLevel.MEMORY_AND_DISK)
+
+      /* Write results */
+      steps.
     }
   }
 }
